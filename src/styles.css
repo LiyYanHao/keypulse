@@ -264,6 +264,33 @@ h1 {
   margin-bottom: 12px;
 }
 
+.segmented-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #d0d8e3;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.segmented-control button {
+  min-width: 58px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  color: #667085;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.segmented-control button.is-active {
+  color: #ffffff;
+  background: #1f6fb2;
+}
+
 .category-list,
 .shortcut-list {
   display: grid;
@@ -338,30 +365,36 @@ kbd {
   min-height: 152px;
 }
 
-.hour-grid {
+.heatmap-grid {
   display: grid;
   grid-template-columns: repeat(24, minmax(0, 1fr));
-  gap: 6px;
-  align-items: end;
-  min-height: 88px;
+  gap: 7px;
+  min-height: 64px;
 }
 
-.hour-cell {
+.heatmap-grid.is-half-hour {
+  grid-template-columns: repeat(48, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.heatmap-cell {
   display: grid;
-  grid-template-rows: 1fr 16px;
-  gap: 5px;
-  align-items: end;
+  grid-template-rows: auto 14px;
+  gap: 6px;
   min-width: 0;
 }
 
-.hour-cell span {
+.heatmap-cell span {
   display: block;
-  min-height: 3px;
-  border-radius: 5px 5px 2px 2px;
-  background: #1f6fb2;
+  aspect-ratio: 1;
+  min-height: 10px;
+  border: 1px solid rgba(24, 34, 48, 0.06);
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
-.hour-cell small {
+.heatmap-cell small {
+  min-height: 14px;
   overflow: hidden;
   color: #7a899a;
   font-size: 9px;
@@ -403,5 +436,9 @@ kbd {
   .hero-grid,
   .content-grid {
     grid-template-columns: 1fr;
+  }
+
+  .heatmap-grid.is-half-hour {
+    grid-template-columns: repeat(24, minmax(0, 1fr));
   }
 }

@@ -11,7 +11,7 @@ It helps you understand typing rhythm, shortcut usage, and daily keyboard activi
 - Real-time keystrokes per minute
 - Daily total key count
 - Peak keys per minute
-- Hourly activity chart
+- 30-minute and hourly activity heatmap
 - Key category statistics for Enter, Backspace, Tab, Esc, arrows, function keys, modifiers, and more
 - Shortcut statistics for combinations such as Cmd+C or Ctrl+V
 - macOS menu bar resident mode after closing the main window
@@ -74,13 +74,15 @@ npm run build
 Build the desktop app:
 
 ```bash
-npm run tauri -- build
+npm run tauri:build
 ```
+
+On macOS, this build script creates or reuses a local `KeyPulse Local Code Signing` identity so Input Monitoring permission stays bound across rebuilds.
 
 ## Project Structure
 
 ```text
-keypulse-mac/
+keypulse/
 ├── src/                 # React renderer
 ├── src-tauri/           # Tauri and Rust native layer
 ├── scripts/             # Utility scripts

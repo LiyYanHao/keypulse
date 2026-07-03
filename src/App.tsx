@@ -25,6 +25,7 @@ interface KeyStats {
   categoryCounts: Record<string, number>;
   shortcutCounts: Record<string, number>;
   hourlyCounts: number[];
+  halfHourlyCounts: number[];
 }
 
 interface CountItem {
@@ -64,6 +65,8 @@ const categoryLabels: Record<string, string> = {
   other: '其他',
 };
 
+type HeatmapMode = 'halfHour' | 'hour';
+
 function compactNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value || 0);
 }
@@ -75,6 +78,24 @@ function formatTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatHeatmapLabel(index: number, mode: HeatmapMode): string {
+  if (mode === 'hour') {
+    return `${String(index).padStart(2, '0')}:00`;
+  }
+  const hour = Math.floor(index / 2);
+  const minute = index % 2 === 0 ? '00' : '30';
+  return `${String(hour).padStart(2, '0')}:${minute}`;
+}
+
+function heatmapColor(count: number, maxCount: number): string {
+  if (count <= 0) {
+    return '#edf2f7';
+  }
+  const intensity = Math.min(1, count / Math.max(1, maxCount));
+  const alpha = 0.18 + intensity * 0.72;
+  return `rgba(31, 111, 178, ${alpha.toFixed(2)})`;
 }
 
 function emptySnapshot(): StatsSnapshot {
@@ -93,6 +114,7 @@ function emptySnapshot(): StatsSnapshot {
       categoryCounts: {},
       shortcutCounts: {},
       hourlyCounts: Array.from({ length: 24 }, () => 0),
+      halfHourlyCounts: Array.from({ length: 48 }, () => 0),
     },
     topShortcuts: [],
     topCategories: [],
@@ -102,10 +124,19 @@ function emptySnapshot(): StatsSnapshot {
 function App() {
   const [snapshot, setSnapshot] = useState<StatsSnapshot>(emptySnapshot);
   const [busy, setBusy] = useState(false);
+  const [heatmapMode, setHeatmapMode] = useState<HeatmapMode>('halfHour');
   const [notice, setNotice] = useState('');
 
   const stats = snapshot.stats;
-  const maxHour = Math.max(1, ...stats.hourlyCounts);
+  const heatmapSource = heatmapMode === 'halfHour' ? stats.halfHourlyCounts : stats.hourlyCounts;
+  const maxHeatmapCount = Math.max(1, ...heatmapSource);
+  const heatmapBuckets = useMemo(() => {
+    return heatmapSource.map((count, index) => {
+      const label = formatHeatmapLabel(index, heatmapMode);
+      const visibleLabel = heatmapMode === 'hour' || index % 4 === 0 ? label.slice(0, 2) : '';
+      return { count, index, label, visibleLabel };
+    });
+  }, [heatmapMode, heatmapSource]);
   const categoryRows = useMemo(() => {
     return [
       'letter',
@@ -166,6 +197,12 @@ function App() {
   async function openPermissions() {
     await invoke('open_permissions');
     setNotice('已打开系统权限设置，授权后请重启 KeyPulse 生效');
+    window.setTimeout(() => void refresh(), 1200);
+  }
+
+  async function repairPermissions() {
+    await invoke('repair_permissions');
+    setNotice('已清理旧授权绑定，请重新打开 KeyPulse 的输入监控开关');
     window.setTimeout(() => void refresh(), 1200);
   }
 
@@ -238,10 +275,16 @@ function App() {
             权限
           </button>
           {!snapshot.inputMonitoringGranted ? (
-            <button type="button" className="ghost-button" onClick={restartApp}>
-              <RefreshCcw size={16} />
-              重启生效
-            </button>
+            <>
+              <button type="button" className="ghost-button" onClick={repairPermissions}>
+                <RefreshCcw size={16} />
+                修复绑定
+              </button>
+              <button type="button" className="ghost-button" onClick={restartApp}>
+                <RefreshCcw size={16} />
+                重启生效
+              </button>
+            </>
           ) : null}
         </div>
       </section>
@@ -333,14 +376,36 @@ function App() {
 
       <section className="panel heatmap-panel">
         <div className="panel-header">
-          <strong>今日节奏</strong>
-          <small>按小时聚合</small>
+          <div>
+            <strong>敲击热力图</strong>
+            <small>{heatmapMode === 'halfHour' ? '按 30 分钟聚合' : '按 1 小时聚合'}</small>
+          </div>
+          <div className="segmented-control" aria-label="热力图粒度">
+            <button
+              type="button"
+              className={heatmapMode === 'halfHour' ? 'is-active' : ''}
+              onClick={() => setHeatmapMode('halfHour')}
+            >
+              30分钟
+            </button>
+            <button
+              type="button"
+              className={heatmapMode === 'hour' ? 'is-active' : ''}
+              onClick={() => setHeatmapMode('hour')}
+            >
+              1小时
+            </button>
+          </div>
         </div>
-        <div className="hour-grid">
-          {stats.hourlyCounts.map((count, hour) => (
-            <div className="hour-cell" key={hour}>
-              <span style={{ height: `${Math.max(3, (count / maxHour) * 100)}%` }} />
-              <small>{hour}</small>
+        <div className={`heatmap-grid ${heatmapMode === 'halfHour' ? 'is-half-hour' : ''}`}>
+          {heatmapBuckets.map((bucket) => (
+            <div className="heatmap-cell" key={bucket.index}>
+              <span
+                aria-label={`${bucket.label} ${bucket.count} 次敲击`}
+                title={`${bucket.label} · ${compactNumber(bucket.count)} 次`}
+                style={{ backgroundColor: heatmapColor(bucket.count, maxHeatmapCount) }}
+              />
+              <small>{bucket.visibleLabel}</small>
             </div>
           ))}
         </div>

@@ -50,7 +50,10 @@ struct KeyStats {
     peak_per_minute: u64,
     category_counts: HashMap<String, u64>,
     shortcut_counts: HashMap<String, u64>,
+    #[serde(default = "default_hourly_counts")]
     hourly_counts: [u64; 24],
+    #[serde(default = "default_half_hourly_counts")]
+    half_hourly_counts: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +139,14 @@ fn default_category_counts() -> HashMap<String, u64> {
     .collect()
 }
 
+fn default_hourly_counts() -> [u64; 24] {
+    [0; 24]
+}
+
+fn default_half_hourly_counts() -> Vec<u64> {
+    vec![0; 48]
+}
+
 fn fresh_stats() -> KeyStats {
     let now = now_string();
     KeyStats {
@@ -147,7 +158,8 @@ fn fresh_stats() -> KeyStats {
         peak_per_minute: 0,
         category_counts: default_category_counts(),
         shortcut_counts: HashMap::new(),
-        hourly_counts: [0; 24],
+        hourly_counts: default_hourly_counts(),
+        half_hourly_counts: default_half_hourly_counts(),
     }
 }
 
@@ -165,6 +177,7 @@ fn load_stats(path: &PathBuf) -> KeyStats {
     let Ok(raw) = fs::read_to_string(path) else {
         return fresh_stats();
     };
+    let has_half_hourly_counts = raw.contains("\"halfHourlyCounts\"");
     let Ok(mut stats) = serde_json::from_str::<KeyStats>(&raw) else {
         return fresh_stats();
     };
@@ -173,6 +186,15 @@ fn load_stats(path: &PathBuf) -> KeyStats {
     }
     for (key, value) in default_category_counts() {
         stats.category_counts.entry(key).or_insert(value);
+    }
+    stats.half_hourly_counts.resize(48, 0);
+    stats.half_hourly_counts.truncate(48);
+    if !has_half_hourly_counts {
+        for (hour, count) in stats.hourly_counts.iter().enumerate() {
+            let first_half = count.saturating_sub(count / 2);
+            stats.half_hourly_counts[hour * 2] = first_half;
+            stats.half_hourly_counts[hour * 2 + 1] = count / 2;
+        }
     }
     stats.current_minute_keys = 0;
     stats
@@ -470,7 +492,12 @@ fn process_key_press(state: &KeyPulseState, app: &AppHandle, key_name: String) {
         .peak_per_minute
         .max(runtime.stats.current_minute_keys);
     runtime.stats.updated_at = now_string();
-    runtime.stats.hourly_counts[Local::now().hour() as usize] += 1;
+    let timestamp = Local::now();
+    let hour = timestamp.hour() as usize;
+    let half_hour = hour * 2 + usize::from(timestamp.minute() >= 30);
+    runtime.stats.half_hourly_counts.resize(48, 0);
+    runtime.stats.hourly_counts[hour] += 1;
+    runtime.stats.half_hourly_counts[half_hour] += 1;
     bump(&mut runtime.stats.category_counts, "ordinary");
     bump(&mut runtime.stats.category_counts, category);
 
@@ -749,6 +776,20 @@ fn open_permissions() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn repair_permissions() -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("tccutil")
+            .args(["reset", "ListenEvent", "cn.xingshi.keypulse"])
+            .status();
+        let _ = Command::new("tccutil")
+            .args(["reset", "Accessibility", "cn.xingshi.keypulse"])
+            .status();
+        open_permissions()?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn restart_app(app: AppHandle) {
     app.request_restart();
 }
@@ -961,6 +1002,7 @@ pub fn run() {
             stop_listening,
             reset_today,
             open_permissions,
+            repair_permissions,
             restart_app
         ])
         .build(tauri::generate_context!())
