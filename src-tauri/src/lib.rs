@@ -22,11 +22,9 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "macos")]
-use tauri::image::Image;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     ActivationPolicy, AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
@@ -113,6 +111,7 @@ struct KeyPulseState {
     runtime: Arc<Mutex<RuntimeState>>,
     running: Arc<AtomicBool>,
     listener_started: AtomicBool,
+    tray_icon: Mutex<Option<TrayIcon>>,
     storage_path: PathBuf,
     history_path: PathBuf,
 }
@@ -871,16 +870,9 @@ fn restart_app(app: AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-fn activate_app() {
-    use cocoa::{
-        appkit::{NSApplicationActivateIgnoringOtherApps, NSRunningApplication},
-        base::nil,
-    };
-
-    unsafe {
-        let app = NSRunningApplication::currentApplication(nil);
-        app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps);
-    }
+fn enter_menu_bar_mode(app: &AppHandle) {
+    let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    let _ = app.set_dock_visibility(false);
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -889,7 +881,6 @@ fn show_main_window(app: &AppHandle) {
         let _ = app.set_activation_policy(ActivationPolicy::Regular);
         let _ = app.show();
         let _ = app.set_dock_visibility(true);
-        activate_app();
     }
     let window = app
         .get_webview_window("main")
@@ -918,88 +909,8 @@ fn show_main_window(app: &AppHandle) {
         {
             let _ = window.set_always_on_top(true);
             let _ = window.set_always_on_top(false);
-            activate_app();
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn set_template_icon_pixel(buffer: &mut [u8], size: usize, x: i32, y: i32, alpha: u8) {
-    if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 {
-        return;
-    }
-    let offset = ((y as usize * size) + x as usize) * 4;
-    if buffer[offset + 3] > alpha {
-        return;
-    }
-    buffer[offset] = 255;
-    buffer[offset + 1] = 255;
-    buffer[offset + 2] = 255;
-    buffer[offset + 3] = alpha;
-}
-
-#[cfg(target_os = "macos")]
-fn fill_template_icon_rect(
-    buffer: &mut [u8],
-    size: usize,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    alpha: u8,
-) {
-    for yy in y..(y + height) {
-        for xx in x..(x + width) {
-            set_template_icon_pixel(buffer, size, xx, yy, alpha);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn draw_template_icon_line(buffer: &mut [u8], size: usize, from: (i32, i32), to: (i32, i32)) {
-    let dx = to.0 - from.0;
-    let dy = to.1 - from.1;
-    let steps = dx.abs().max(dy.abs()).max(1);
-
-    for step in 0..=steps {
-        let progress = step as f32 / steps as f32;
-        let x = from.0 as f32 + dx as f32 * progress;
-        let y = from.1 as f32 + dy as f32 * progress;
-        let x = x.round() as i32;
-        let y = y.round() as i32;
-
-        set_template_icon_pixel(buffer, size, x, y, 255);
-        set_template_icon_pixel(buffer, size, x + 1, y, 245);
-        set_template_icon_pixel(buffer, size, x - 1, y, 245);
-        set_template_icon_pixel(buffer, size, x, y + 1, 245);
-        set_template_icon_pixel(buffer, size, x, y - 1, 245);
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn tray_template_icon() -> Image<'static> {
-    const SIZE: usize = 22;
-    let mut rgba = vec![0; SIZE * SIZE * 4];
-    let pulse_points = [
-        (2, 10),
-        (6, 10),
-        (8, 6),
-        (11, 15),
-        (14, 5),
-        (16, 10),
-        (20, 10),
-    ];
-
-    for segment in pulse_points.windows(2) {
-        draw_template_icon_line(&mut rgba, SIZE, segment[0], segment[1]);
-    }
-
-    for x in [5, 9, 13, 17] {
-        fill_template_icon_rect(&mut rgba, SIZE, x, 17, 3, 3, 210);
-    }
-    fill_template_icon_rect(&mut rgba, SIZE, 9, 20, 7, 1, 180);
-
-    Image::new_owned(rgba, SIZE as u32, SIZE as u32)
 }
 
 fn build_state() -> Arc<KeyPulseState> {
@@ -1018,6 +929,7 @@ fn build_state() -> Arc<KeyPulseState> {
         })),
         running: Arc::new(AtomicBool::new(false)),
         listener_started: AtomicBool::new(false),
+        tray_icon: Mutex::new(None),
         storage_path,
         history_path,
     })
@@ -1032,19 +944,18 @@ pub fn run() {
             let stop_item = MenuItem::with_id(app, "stop", "暂停监听", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &start_item, &stop_item, &quit_item])?;
-            let tray_builder = TrayIconBuilder::new()
+            let tray_builder = TrayIconBuilder::with_id("keypulse")
                 .menu(&menu)
                 .tooltip("KeyPulse 正在后台运行")
                 .show_menu_on_left_click(false);
+            #[cfg(target_os = "macos")]
+            let tray_builder = tray_builder.title("键");
+            #[cfg(not(target_os = "macos"))]
             let tray_builder = if let Some(icon) = app.default_window_icon().cloned() {
                 tray_builder.icon(icon)
             } else {
                 tray_builder
             };
-            #[cfg(target_os = "macos")]
-            let tray_builder = tray_builder
-                .icon(tray_template_icon())
-                .icon_as_template(true);
             let _tray = tray_builder
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
@@ -1079,6 +990,10 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            let _ = _tray.set_visible(true);
+            if let Some(state) = app.try_state::<Arc<KeyPulseState>>() {
+                *state.tray_icon.lock().unwrap() = Some(_tray);
+            }
             show_main_window(app.handle());
             Ok(())
         })
@@ -1089,7 +1004,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 {
                     let app = window.app_handle();
-                    let _ = app.set_dock_visibility(false);
+                    enter_menu_bar_mode(&app);
                 }
             }
         })
