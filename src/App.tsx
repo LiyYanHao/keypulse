@@ -40,12 +40,20 @@ interface CategoryCount extends CountItem {
   category: string;
 }
 
+interface HeatmapDay {
+  date: string;
+  totalKeys: number;
+  hourlyCounts: number[];
+  halfHourlyCounts: number[];
+}
+
 interface StatsSnapshot {
   listening: boolean;
   inputMonitoringGranted: boolean;
   permissionHint: string;
   storagePath: string;
   stats: KeyStats;
+  historyDays: HeatmapDay[];
   topShortcuts: ShortcutCount[];
   topCategories: CategoryCount[];
 }
@@ -66,6 +74,15 @@ const categoryLabels: Record<string, string> = {
 };
 
 type HeatmapMode = 'halfHour' | 'hour';
+type TimeFilter = 'last7' | 'thisWeek' | 'lastWeek';
+
+const timeFilterLabels: Record<TimeFilter, string> = {
+  last7: '最近7天',
+  thisWeek: '本周',
+  lastWeek: '上周',
+};
+
+const weekdayLabels = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 function compactNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value || 0);
@@ -87,6 +104,43 @@ function formatHeatmapLabel(index: number, mode: HeatmapMode): string {
   const hour = Math.floor(index / 2);
   const minute = index % 2 === 0 ? '00' : '30';
   return `${String(hour).padStart(2, '0')}:${minute}`;
+}
+
+function parseDateKey(value: string): Date {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function formatDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function startOfWeek(date: Date): Date {
+  const day = date.getDay();
+  return addDays(date, day === 0 ? -6 : 1 - day);
+}
+
+function formatMonthDay(dateKey: string): string {
+  return dateKey.slice(5).replace('-', '/');
+}
+
+function buildFilterDates(todayKey: string, filter: TimeFilter): string[] {
+  const today = parseDateKey(todayKey || formatDateKey(new Date()));
+  if (filter === 'last7') {
+    return Array.from({ length: 7 }, (_, index) => formatDateKey(addDays(today, index - 6)));
+  }
+  const weekStart = startOfWeek(today);
+  const start = filter === 'thisWeek' ? weekStart : addDays(weekStart, -7);
+  return Array.from({ length: 7 }, (_, index) => formatDateKey(addDays(start, index)));
 }
 
 function heatmapColor(count: number, maxCount: number): string {
@@ -116,6 +170,7 @@ function emptySnapshot(): StatsSnapshot {
       hourlyCounts: Array.from({ length: 24 }, () => 0),
       halfHourlyCounts: Array.from({ length: 48 }, () => 0),
     },
+    historyDays: [],
     topShortcuts: [],
     topCategories: [],
   };
@@ -125,18 +180,42 @@ function App() {
   const [snapshot, setSnapshot] = useState<StatsSnapshot>(emptySnapshot);
   const [busy, setBusy] = useState(false);
   const [heatmapMode, setHeatmapMode] = useState<HeatmapMode>('halfHour');
+  const [timeFilter, setTimeFilter] = useState<TimeFilter>('last7');
   const [notice, setNotice] = useState('');
 
   const stats = snapshot.stats;
-  const heatmapSource = heatmapMode === 'halfHour' ? stats.halfHourlyCounts : stats.hourlyCounts;
-  const maxHeatmapCount = Math.max(1, ...heatmapSource);
-  const heatmapBuckets = useMemo(() => {
-    return heatmapSource.map((count, index) => {
-      const label = formatHeatmapLabel(index, heatmapMode);
-      const visibleLabel = heatmapMode === 'hour' || index % 4 === 0 ? label.slice(0, 2) : '';
-      return { count, index, label, visibleLabel };
+  const historyByDate = useMemo(() => {
+    const map = new Map<string, HeatmapDay>();
+    snapshot.historyDays.forEach((day) => map.set(day.date, day));
+    if (stats.date) {
+      map.set(stats.date, {
+        date: stats.date,
+        totalKeys: stats.totalKeys,
+        hourlyCounts: stats.hourlyCounts,
+        halfHourlyCounts: stats.halfHourlyCounts,
+      });
+    }
+    return map;
+  }, [snapshot.historyDays, stats]);
+  const selectedDates = useMemo(() => buildFilterDates(stats.date, timeFilter), [stats.date, timeFilter]);
+  const selectedHeatmapDays = useMemo(() => {
+    const bucketCount = heatmapMode === 'halfHour' ? 48 : 24;
+    return selectedDates.map((date) => {
+      const day = historyByDate.get(date);
+      const source = heatmapMode === 'halfHour' ? day?.halfHourlyCounts : day?.hourlyCounts;
+      const buckets = Array.from({ length: bucketCount }, (_, index) => source?.[index] ?? 0);
+      return {
+        buckets,
+        date,
+        totalKeys: day?.totalKeys ?? 0,
+        weekday: weekdayLabels[parseDateKey(date).getDay()],
+      };
     });
-  }, [heatmapMode, heatmapSource]);
+  }, [heatmapMode, historyByDate, selectedDates]);
+  const maxHeatmapCount = Math.max(1, ...selectedHeatmapDays.flatMap((day) => day.buckets));
+  const heatmapAxisLabels = heatmapMode === 'halfHour'
+    ? ['00', '04', '08', '12', '16', '20', '24']
+    : ['00', '04', '08', '12', '16', '20', '24'];
   const categoryRows = useMemo(() => {
     return [
       'letter',
@@ -378,36 +457,69 @@ function App() {
         <div className="panel-header">
           <div>
             <strong>敲击热力图</strong>
-            <small>{heatmapMode === 'halfHour' ? '按 30 分钟聚合' : '按 1 小时聚合'}</small>
+            <small>{timeFilterLabels[timeFilter]} · {heatmapMode === 'halfHour' ? '按 30 分钟聚合' : '按 1 小时聚合'}</small>
           </div>
-          <div className="segmented-control" aria-label="热力图粒度">
-            <button
-              type="button"
-              className={heatmapMode === 'halfHour' ? 'is-active' : ''}
-              onClick={() => setHeatmapMode('halfHour')}
-            >
-              30分钟
-            </button>
-            <button
-              type="button"
-              className={heatmapMode === 'hour' ? 'is-active' : ''}
-              onClick={() => setHeatmapMode('hour')}
-            >
-              1小时
-            </button>
+          <div className="heatmap-toolbar">
+            <div className="segmented-control" aria-label="热力图时间范围">
+              {(['last7', 'thisWeek', 'lastWeek'] as TimeFilter[]).map((filter) => (
+                <button
+                  type="button"
+                  key={filter}
+                  className={timeFilter === filter ? 'is-active' : ''}
+                  onClick={() => setTimeFilter(filter)}
+                >
+                  {timeFilterLabels[filter]}
+                </button>
+              ))}
+            </div>
+            <div className="segmented-control" aria-label="热力图粒度">
+              <button
+                type="button"
+                className={heatmapMode === 'halfHour' ? 'is-active' : ''}
+                onClick={() => setHeatmapMode('halfHour')}
+              >
+                30分钟
+              </button>
+              <button
+                type="button"
+                className={heatmapMode === 'hour' ? 'is-active' : ''}
+                onClick={() => setHeatmapMode('hour')}
+              >
+                1小时
+              </button>
+            </div>
           </div>
         </div>
-        <div className={`heatmap-grid ${heatmapMode === 'halfHour' ? 'is-half-hour' : ''}`}>
-          {heatmapBuckets.map((bucket) => (
-            <div className="heatmap-cell" key={bucket.index}>
-              <span
-                aria-label={`${bucket.label} ${bucket.count} 次敲击`}
-                title={`${bucket.label} · ${compactNumber(bucket.count)} 次`}
-                style={{ backgroundColor: heatmapColor(bucket.count, maxHeatmapCount) }}
-              />
-              <small>{bucket.visibleLabel}</small>
+        <div className={`weekly-heatmap ${heatmapMode === 'halfHour' ? 'is-half-hour' : ''}`}>
+          {selectedHeatmapDays.map((day) => (
+            <div className="weekly-heatmap-row" key={day.date}>
+              <div className="week-day-label">
+                <strong>{day.weekday}</strong>
+                <span>{formatMonthDay(day.date)}</span>
+              </div>
+              <div className="weekly-heatmap-slots">
+                {day.buckets.map((count, index) => {
+                  const label = formatHeatmapLabel(index, heatmapMode);
+                  return (
+                    <span
+                      key={`${day.date}-${index}`}
+                      aria-label={`${day.date} ${label} ${count} 次敲击`}
+                      title={`${day.date} ${label} · ${compactNumber(count)} 次`}
+                      style={{ backgroundColor: heatmapColor(count, maxHeatmapCount) }}
+                    />
+                  );
+                })}
+              </div>
             </div>
           ))}
+          <div className="weekly-heatmap-axis">
+            <span />
+            <div>
+              {heatmapAxisLabels.map((label) => (
+                <small key={label}>{label}</small>
+              ))}
+            </div>
+          </div>
         </div>
       </section>
 

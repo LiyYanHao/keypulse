@@ -275,7 +275,7 @@ h1 {
 }
 
 .segmented-control button {
-  min-width: 58px;
+  min-width: 54px;
   min-height: 26px;
   padding: 0 8px;
   border: 0;
@@ -362,44 +362,83 @@ kbd {
 }
 
 .heatmap-panel {
-  min-height: 152px;
+  min-height: 260px;
 }
 
-.heatmap-grid {
+.heatmap-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.weekly-heatmap {
   display: grid;
-  grid-template-columns: repeat(24, minmax(0, 1fr));
-  gap: 7px;
-  min-height: 64px;
-}
-
-.heatmap-grid.is-half-hour {
-  grid-template-columns: repeat(48, minmax(0, 1fr));
-  gap: 4px;
-}
-
-.heatmap-cell {
-  display: grid;
-  grid-template-rows: auto 14px;
   gap: 6px;
+}
+
+.weekly-heatmap-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.week-day-label {
+  display: grid;
+  gap: 1px;
   min-width: 0;
 }
 
-.heatmap-cell span {
+.week-day-label strong {
+  color: #344054;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.week-day-label span {
+  color: #8a98aa;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.weekly-heatmap-slots {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.weekly-heatmap.is-half-hour .weekly-heatmap-slots {
+  grid-template-columns: repeat(48, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.weekly-heatmap-slots span {
   display: block;
   aspect-ratio: 1;
-  min-height: 10px;
+  min-height: 9px;
   border: 1px solid rgba(24, 34, 48, 0.06);
-  border-radius: 4px;
+  border-radius: 3px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
-.heatmap-cell small {
-  min-height: 14px;
-  overflow: hidden;
+.weekly-heatmap-axis {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding-top: 2px;
+}
+
+.weekly-heatmap-axis div {
+  display: flex;
+  justify-content: space-between;
   color: #7a899a;
+}
+
+.weekly-heatmap-axis small {
   font-size: 9px;
-  text-align: center;
-  text-overflow: clip;
+  line-height: 1;
 }
 
 .footer {
@@ -438,7 +477,7 @@ kbd {
     grid-template-columns: 1fr;
   }
 
-  .heatmap-grid.is-half-hour {
+  .weekly-heatmap.is-half-hour .weekly-heatmap-slots {
     grid-template-columns: repeat(24, minmax(0, 1fr));
   }
 }

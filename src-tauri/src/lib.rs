@@ -27,7 +27,8 @@ use tauri::image::Image;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    ActivationPolicy, AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 const STATS_EVENT: &str = "stats-updated";
@@ -64,8 +65,18 @@ struct StatsSnapshot {
     permission_hint: String,
     storage_path: String,
     stats: KeyStats,
+    history_days: Vec<HeatmapDay>,
     top_shortcuts: Vec<ShortcutCount>,
     top_categories: Vec<CategoryCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeatmapDay {
+    date: String,
+    total_keys: u64,
+    hourly_counts: [u64; 24],
+    half_hourly_counts: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +103,7 @@ struct Modifiers {
 
 struct RuntimeState {
     stats: KeyStats,
+    history: HashMap<String, KeyStats>,
     recent_events: VecDeque<u128>,
     modifiers: Modifiers,
     last_save_ms: u128,
@@ -102,6 +114,7 @@ struct KeyPulseState {
     running: Arc<AtomicBool>,
     listener_started: AtomicBool,
     storage_path: PathBuf,
+    history_path: PathBuf,
 }
 
 fn today_string() -> String {
@@ -173,31 +186,54 @@ fn stats_path() -> PathBuf {
     stats_dir().join("today-stats.json")
 }
 
-fn load_stats(path: &PathBuf) -> KeyStats {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return fresh_stats();
-    };
-    let has_half_hourly_counts = raw.contains("\"halfHourlyCounts\"");
-    let Ok(mut stats) = serde_json::from_str::<KeyStats>(&raw) else {
-        return fresh_stats();
-    };
-    if stats.date != today_string() {
-        return fresh_stats();
-    }
+fn history_path() -> PathBuf {
+    stats_dir().join("stats-history.json")
+}
+
+fn normalize_stats(stats: &mut KeyStats) {
     for (key, value) in default_category_counts() {
         stats.category_counts.entry(key).or_insert(value);
     }
     stats.half_hourly_counts.resize(48, 0);
     stats.half_hourly_counts.truncate(48);
-    if !has_half_hourly_counts {
+    let hourly_total: u64 = stats.hourly_counts.iter().sum();
+    let half_hourly_total: u64 = stats.half_hourly_counts.iter().sum();
+    if hourly_total > 0 && half_hourly_total == 0 {
         for (hour, count) in stats.hourly_counts.iter().enumerate() {
             let first_half = count.saturating_sub(count / 2);
             stats.half_hourly_counts[hour * 2] = first_half;
             stats.half_hourly_counts[hour * 2 + 1] = count / 2;
         }
     }
+}
+
+fn load_stats(path: &PathBuf) -> KeyStats {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return fresh_stats();
+    };
+    let Ok(mut stats) = serde_json::from_str::<KeyStats>(&raw) else {
+        return fresh_stats();
+    };
+    if stats.date != today_string() {
+        return fresh_stats();
+    }
+    normalize_stats(&mut stats);
     stats.current_minute_keys = 0;
     stats
+}
+
+fn load_history(path: &PathBuf) -> HashMap<String, KeyStats> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(mut history) = serde_json::from_str::<HashMap<String, KeyStats>>(&raw) else {
+        return HashMap::new();
+    };
+    for stats in history.values_mut() {
+        normalize_stats(stats);
+        stats.current_minute_keys = 0;
+    }
+    history
 }
 
 fn save_stats(path: &PathBuf, stats: &KeyStats) {
@@ -205,6 +241,15 @@ fn save_stats(path: &PathBuf, stats: &KeyStats) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(payload) = serde_json::to_string_pretty(stats) {
+        let _ = fs::write(path, payload);
+    }
+}
+
+fn save_history(path: &PathBuf, history: &HashMap<String, KeyStats>) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(payload) = serde_json::to_string_pretty(history) {
         let _ = fs::write(path, payload);
     }
 }
@@ -435,6 +480,30 @@ fn sorted_counts(map: &HashMap<String, u64>, limit: usize) -> Vec<(String, u64)>
     items
 }
 
+fn history_days(runtime: &RuntimeState) -> Vec<HeatmapDay> {
+    let mut by_date = runtime.history.clone();
+    by_date.insert(runtime.stats.date.clone(), runtime.stats.clone());
+    let mut days: Vec<HeatmapDay> = by_date
+        .values()
+        .map(|stats| HeatmapDay {
+            date: stats.date.clone(),
+            total_keys: stats.total_keys,
+            hourly_counts: stats.hourly_counts,
+            half_hourly_counts: stats.half_hourly_counts.clone(),
+        })
+        .collect();
+    days.sort_by(|left, right| left.date.cmp(&right.date));
+    days
+}
+
+fn persist_runtime(state: &KeyPulseState, runtime: &mut RuntimeState) {
+    runtime
+        .history
+        .insert(runtime.stats.date.clone(), runtime.stats.clone());
+    save_stats(&state.storage_path, &runtime.stats);
+    save_history(&state.history_path, &runtime.history);
+}
+
 fn snapshot_from_runtime(
     runtime: &RuntimeState,
     running: bool,
@@ -446,6 +515,7 @@ fn snapshot_from_runtime(
         permission_hint: permission_hint(),
         storage_path: storage_path.display().to_string(),
         stats: runtime.stats.clone(),
+        history_days: history_days(runtime),
         top_shortcuts: sorted_counts(&runtime.stats.shortcut_counts, 8)
             .into_iter()
             .map(|(shortcut, count)| ShortcutCount { shortcut, count })
@@ -459,7 +529,13 @@ fn snapshot_from_runtime(
 
 fn reset_if_new_day(runtime: &mut RuntimeState) {
     if runtime.stats.date != today_string() {
+        runtime
+            .history
+            .insert(runtime.stats.date.clone(), runtime.stats.clone());
         runtime.stats = fresh_stats();
+        runtime
+            .history
+            .insert(runtime.stats.date.clone(), runtime.stats.clone());
         runtime.recent_events.clear();
     }
 }
@@ -507,7 +583,7 @@ fn process_key_press(state: &KeyPulseState, app: &AppHandle, key_name: String) {
     }
 
     if now.saturating_sub(runtime.last_save_ms) > 900 {
-        save_stats(&state.storage_path, &runtime.stats);
+        persist_runtime(state, &mut runtime);
         runtime.last_save_ms = now;
     }
 
@@ -741,7 +817,7 @@ fn stop_listening(state: State<'_, Arc<KeyPulseState>>) -> StatsSnapshot {
     state.running.store(false, Ordering::SeqCst);
     let mut runtime = state.runtime.lock().unwrap();
     runtime.modifiers = Modifiers::default();
-    save_stats(&state.storage_path, &runtime.stats);
+    persist_runtime(&state, &mut runtime);
     snapshot_from_runtime(&runtime, false, &state.storage_path)
 }
 
@@ -751,7 +827,7 @@ fn reset_today(state: State<'_, Arc<KeyPulseState>>) -> StatsSnapshot {
     runtime.stats = fresh_stats();
     runtime.recent_events.clear();
     runtime.modifiers = Modifiers::default();
-    save_stats(&state.storage_path, &runtime.stats);
+    persist_runtime(&state, &mut runtime);
     snapshot_from_runtime(
         &runtime,
         state.running.load(Ordering::SeqCst),
@@ -794,11 +870,26 @@ fn restart_app(app: AppHandle) {
     app.request_restart();
 }
 
+#[cfg(target_os = "macos")]
+fn activate_app() {
+    use cocoa::{
+        appkit::{NSApplicationActivateIgnoringOtherApps, NSRunningApplication},
+        base::nil,
+    };
+
+    unsafe {
+        let app = NSRunningApplication::currentApplication(nil);
+        app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps);
+    }
+}
+
 fn show_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
         let _ = app.show();
         let _ = app.set_dock_visibility(true);
+        activate_app();
     }
     let window = app
         .get_webview_window("main")
@@ -827,6 +918,7 @@ fn show_main_window(app: &AppHandle) {
         {
             let _ = window.set_always_on_top(true);
             let _ = window.set_always_on_top(false);
+            activate_app();
         }
     }
 }
@@ -912,10 +1004,14 @@ fn tray_template_icon() -> Image<'static> {
 
 fn build_state() -> Arc<KeyPulseState> {
     let storage_path = stats_path();
+    let history_path = history_path();
     let stats = load_stats(&storage_path);
+    let mut history = load_history(&history_path);
+    history.insert(stats.date.clone(), stats.clone());
     Arc::new(KeyPulseState {
         runtime: Arc::new(Mutex::new(RuntimeState {
             stats,
+            history,
             recent_events: VecDeque::new(),
             modifiers: Modifiers::default(),
             last_save_ms: 0,
@@ -923,6 +1019,7 @@ fn build_state() -> Arc<KeyPulseState> {
         running: Arc::new(AtomicBool::new(false)),
         listener_started: AtomicBool::new(false),
         storage_path,
+        history_path,
     })
 }
 
@@ -1009,6 +1106,7 @@ pub fn run() {
         .expect("error while building KeyPulse");
 
     app.run(|app_handle, event| match event {
+        tauri::RunEvent::Ready => show_main_window(app_handle),
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
         _ => {}

@@ -1691,6 +1691,7 @@ name = "keypulse"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "cocoa",
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
  "directories",

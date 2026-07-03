@@ -11,7 +11,7 @@ It helps you understand typing rhythm, shortcut usage, and daily keyboard activi
 - Real-time keystrokes per minute
 - Daily total key count
 - Peak keys per minute
-- 30-minute and hourly activity heatmap
+- Weekly activity heatmap with 30-minute/hourly granularity and time filters
 - Key category statistics for Enter, Backspace, Tab, Esc, arrows, function keys, modifiers, and more
 - Shortcut statistics for combinations such as Cmd+C or Ctrl+V
 - macOS menu bar resident mode after closing the main window
